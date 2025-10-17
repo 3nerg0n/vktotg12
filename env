@@ -1,0 +1,12 @@
+# VK настройки
+VK_TOKEN=vk1.a.x2-uObM-R3pukJbaTPgbunaR61q-IBnYx8rgzLnHiForg3LRO7bWtWkf7P3-TBJAZUByq1GJgCLPzzHMxwVo5dUve3yMx1ANkRoA_1yowVRfFq5Mc1XKG-IaLeO-BKW9Os1AbCUQzicg6yqt9plUIVgYEzM8zbjVN8XcUC8C0Bog0ExqsAqFhUwkZwUaupG9gJDGWO-XekIwd0jUs8VUKg
+VK_GROUP_ID=162703058
+
+# Telegram настройки (основной бот)
+TG_TOKEN=7688286615:AAFe53nU22Yv5OpqqgLligtDMsbthUIXpAM
+TG_CHANNEL_ID=@RaspisanieIMT
+TG_USER_ID=7808626577
+
+# Telegram контроллер (новый бот для управления)
+TG_CONTROLLER_TOKEN=7688286615:AAFe53nU22Yv5OpqqgLligtDMsbthUIXpAM
+TG_ADMIN_ID=7808626577
