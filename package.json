@@ -1,12 +1,18 @@
 {
   "name": "vk-telegram-bot",
   "version": "1.0.0",
+  "description": "VK to Telegram bot with web controller",
+  "main": "bot-server.js",
   "scripts": {
-    "start": "node bot-server.js"
+    "start": "node bot-server.js",
+    "dev": "nodemon bot-server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "telegraf": "^4.12.2",
     "vk-io": "^4.6.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
