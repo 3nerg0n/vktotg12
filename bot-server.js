@@ -12,7 +12,8 @@ class VkTelegramBot {
         this.stats = {
             photosSent: 0,
             startTime: null,
-            lastUpdate: null
+            lastUpdate: null,
+            lastPostId: 0 // Добавляем отслеживание последнего поста
         };
         this.vkPollingInterval = null;
         
@@ -26,14 +27,7 @@ class VkTelegramBot {
                 token: process.env.VK_TOKEN
             });
             
-            // Инициализация Telegram ботов с обработкой ошибок
-            this.tgBot = new Telegraf(process.env.TG_TOKEN, {
-                telegram: { 
-                    agent: null, 
-                    attachmentAgent: null 
-                }
-            });
-            
+            // Инициализация только контроллера - основной бот не нужен для получения сообщений
             this.controllerBot = new Telegraf(process.env.TG_CONTROLLER_TOKEN, {
                 telegram: { 
                     agent: null, 
@@ -41,11 +35,7 @@ class VkTelegramBot {
                 }
             });
             
-            // Обработка ошибок Telegram ботов
-            this.tgBot.catch((err, ctx) => {
-                console.error(`❌ Ошибка основного бота:`, err);
-            });
-            
+            // Обработка ошибок контроллера
             this.controllerBot.catch((err, ctx) => {
                 console.error(`❌ Ошибка бота-контроллера:`, err);
             });
@@ -77,27 +67,16 @@ class VkTelegramBot {
             this.stats.lastUpdate = new Date();
             this.isRunning = true;
             
-            // Запускаем Telegram ботов с обработкой webhook режима
-            try {
-                await this.tgBot.launch({
-                    dropPendingUpdates: true, // Очищаем pending updates
-                    allowedUpdates: [] // Не получаем никакие updates для основного бота
-                });
-                console.log('✅ Основной Telegram бот запущен');
-            } catch (tgError) {
-                console.error('❌ Ошибка запуска основного Telegram бота:', tgError.message);
-                // Продолжаем работу даже если основной бот не запустился
-            }
-            
+            // Запускаем только контроллер
             try {
                 await this.controllerBot.launch({
-                    dropPendingUpdates: true, // Очищаем pending updates
-                    allowedUpdates: ['message'] // Получаем только сообщения для контроллера
+                    dropPendingUpdates: true,
+                    allowedUpdates: ['message']
                 });
                 console.log('✅ Бот-контроллер запущен');
             } catch (controllerError) {
                 console.error('❌ Ошибка запуска бота-контроллера:', controllerError.message);
-                throw controllerError; // Контроллер обязателен для работы
+                throw controllerError;
             }
             
             // Настройка команд контроллера
@@ -117,7 +96,7 @@ class VkTelegramBot {
     
     async setupVKListener() {
         try {
-            // Проверяем доступность VK API с правильными параметрами
+            // Проверяем доступность VK API
             const groupId = process.env.VK_GROUP_ID;
             if (!groupId) {
                 console.warn('⚠️ VK_GROUP_ID не установлен, VK мониторинг отключен');
@@ -130,12 +109,37 @@ class VkTelegramBot {
             
             console.log('✅ VK API подключен. Группа:', groups[0]?.name || 'Неизвестно');
             
+            // Получаем последний пост для установки начального ID
+            await this.initializeLastPostId();
+            
             // Запускаем мониторинг VK
             this.startVKPolling();
             
         } catch (error) {
             console.error('❌ Ошибка настройки VK слушателя:', error.message);
             console.log('⚠️ Продолжаем работу без VK мониторинга');
+        }
+    }
+    
+    async initializeLastPostId() {
+        try {
+            const groupId = process.env.VK_GROUP_ID;
+            const posts = await this.vk.api.wall.get({
+                owner_id: -Math.abs(parseInt(groupId)),
+                count: 1,
+                filter: 'owner'
+            });
+            
+            if (posts.items.length > 0) {
+                this.stats.lastPostId = posts.items[0].id;
+                console.log(`📝 Установлен последний пост ID: ${this.stats.lastPostId}`);
+            } else {
+                this.stats.lastPostId = 0;
+                console.log('📝 В группе нет постов, начинаем мониторинг с нуля');
+            }
+        } catch (error) {
+            console.error('❌ Ошибка инициализации последнего поста:', error.message);
+            this.stats.lastPostId = 0;
         }
     }
     
@@ -148,72 +152,135 @@ class VkTelegramBot {
         }
         
         this.vkPollingInterval = setInterval(async () => {
-            if (!this.isRunning) return;
+            if (!this.isRunning) {
+                console.log('⏸️ Бот остановлен, прекращаем опрос VK');
+                return;
+            }
             
             try {
                 const groupId = process.env.VK_GROUP_ID;
                 if (!groupId) {
+                    console.log('⚠️ VK_GROUP_ID не установлен, пропускаем опрос');
                     return;
                 }
                 
+                console.log('🔍 Проверяем новые посты в VK...');
+                
                 const posts = await this.vk.api.wall.get({
                     owner_id: -Math.abs(parseInt(groupId)),
-                    count: 5,
+                    count: 10,
                     filter: 'owner'
                 });
                 
-                console.log(`📝 Проверено постов: ${posts.items.length}`);
+                console.log(`📝 Получено постов: ${posts.items.length}`);
                 this.stats.lastUpdate = new Date();
                 
-                // Обрабатываем новые посты с фото
-                await this.processVKPosts(posts.items);
+                // Обрабатываем новые посты
+                const newPosts = await this.processNewVKPosts(posts.items);
+                
+                if (newPosts > 0) {
+                    console.log(`✅ Обработано новых постов: ${newPosts}`);
+                } else {
+                    console.log('📭 Новых постов не найдено');
+                }
                 
             } catch (error) {
                 console.error('❌ Ошибка при опросе VK:', error.message);
             }
-        }, 60000); // Проверка каждую минуту
+        }, 30000); // Проверка каждые 30 секунд для тестирования
     }
     
-    async processVKPosts(posts) {
-        for (const post of posts) {
-            if (post.attachments) {
-                const photos = post.attachments.filter(att => att.type === 'photo');
+    async processNewVKPosts(posts) {
+        let newPostsCount = 0;
+        
+        // Сортируем посты по ID (от новых к старым)
+        const sortedPosts = posts.sort((a, b) => b.id - a.id);
+        
+        for (const post of sortedPosts) {
+            // Проверяем, новый ли это пост
+            if (post.id > this.stats.lastPostId) {
+                console.log(`🆕 Найден новый пост ID: ${post.id} (предыдущий: ${this.stats.lastPostId})`);
                 
-                if (photos.length > 0) {
-                    console.log(`📸 Найдено ${photos.length} фото в посте ${post.id}`);
+                // Обновляем последний ID
+                this.stats.lastPostId = post.id;
+                
+                // Проверяем наличие фото
+                if (post.attachments) {
+                    const photos = post.attachments.filter(att => att.type === 'photo');
                     
-                    try {
-                        await this.sendToTelegram(photos, post);
-                        this.stats.photosSent += photos.length;
-                        console.log(`✅ Фото из поста ${post.id} отправлены в Telegram`);
-                    } catch (error) {
-                        console.error(`❌ Ошибка отправки фото из поста ${post.id}:`, error.message);
+                    if (photos.length > 0) {
+                        console.log(`📸 В посте ${post.id} найдено ${photos.length} фото`);
+                        
+                        try {
+                            await this.sendPhotosToTelegram(photos, post);
+                            this.stats.photosSent += photos.length;
+                            console.log(`✅ Фото из поста ${post.id} отправлены в Telegram`);
+                        } catch (error) {
+                            console.error(`❌ Ошибка отправки фото из поста ${post.id}:`, error.message);
+                        }
+                    } else {
+                        console.log(`📄 Пост ${post.id} без фото, пропускаем`);
                     }
+                } else {
+                    console.log(`📄 Пост ${post.id} без вложений, пропускаем`);
                 }
+                
+                newPostsCount++;
+                
+                // Добавляем задержку между обработкой постов
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
         }
+        
+        return newPostsCount;
     }
     
-    async sendToTelegram(photos, post) {
+    async sendPhotosToTelegram(photos, post) {
         try {
-            // Используем только контроллер бота для отправки, чтобы избежать конфликтов
-            for (const photo of photos) {
-                const largestPhoto = photo.photo.sizes.reduce((largest, size) => {
-                    return (size.width > largest.width) ? size : largest;
-                });
-                
-                const photoUrl = largestPhoto.url;
-                
-                await this.controllerBot.telegram.sendPhoto(
-                    process.env.TG_CHANNEL_ID,
-                    photoUrl,
-                    {
-                        caption: `📸 Новое фото из VK\n⏰ ${new Date(post.date * 1000).toLocaleString('ru-RU')}`
-                    }
-                );
-                
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Задержка между отправками
+            const channelId = process.env.TG_CHANNEL_ID;
+            if (!channelId) {
+                throw new Error('TG_CHANNEL_ID не установлен');
             }
+            
+            // Отправляем первое фото с описанием
+            const firstPhoto = photos[0];
+            const largestPhoto = firstPhoto.photo.sizes.reduce((largest, size) => {
+                return (size.width > largest.width) ? size : largest;
+            });
+            
+            const photoUrl = largestPhoto.url;
+            const postText = post.text ? post.text.substring(0, 200) + '...' : 'Новый пост';
+            
+            await this.controllerBot.telegram.sendPhoto(
+                channelId,
+                photoUrl,
+                {
+                    caption: `📸 Новый пост из VK\n\n${postText}\n\n⏰ ${new Date(post.date * 1000).toLocaleString('ru-RU')}`
+                }
+            );
+            
+            console.log('✅ Первое фото отправлено в Telegram');
+            
+            // Если есть дополнительные фото, отправляем их без описания
+            if (photos.length > 1) {
+                for (let i = 1; i < photos.length; i++) {
+                    const photo = photos[i];
+                    const largestAdditional = photo.photo.sizes.reduce((largest, size) => {
+                        return (size.width > largest.width) ? size : largest;
+                    });
+                    
+                    await this.controllerBot.telegram.sendPhoto(
+                        channelId,
+                        largestAdditional.url
+                    );
+                    
+                    console.log(`✅ Дополнительное фото ${i + 1}/${photos.length} отправлено`);
+                    
+                    // Задержка между отправками
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+            }
+            
         } catch (error) {
             console.error('❌ Ошибка отправки в Telegram:', error.message);
             throw error;
@@ -234,7 +301,8 @@ class VkTelegramBot {
                     `🤖 Бот: ${status.isRunning ? '🟢 Запущен' : '🔴 Остановлен'}\n` +
                     `📸 Фото отправлено: ${status.photosSent}\n` +
                     `⏱️ Время работы: ${status.uptime}\n` +
-                    `🕒 Последнее обновление: ${status.lastUpdate}`
+                    `🕒 Последняя проверка: ${status.lastUpdate}\n` +
+                    `📝 Последний пост ID: ${status.lastPostId}`
                 );
             } else {
                 ctx.reply('❌ У вас нет прав для выполнения этой команды');
@@ -263,7 +331,46 @@ class VkTelegramBot {
             }
         });
         
+        this.controllerBot.command('test', async (ctx) => {
+            if (ctx.from.id.toString() === process.env.TG_ADMIN_ID) {
+                try {
+                    await this.testVKConnection();
+                    ctx.reply('✅ Тест подключения к VK выполнен успешно');
+                } catch (error) {
+                    ctx.reply('❌ Ошибка теста VK: ' + error.message);
+                }
+            }
+        });
+        
         console.log('✅ Команды контроллера настроены');
+    }
+    
+    async testVKConnection() {
+        try {
+            const groupId = process.env.VK_GROUP_ID;
+            if (!groupId) {
+                throw new Error('VK_GROUP_ID не установлен');
+            }
+            
+            const groups = await this.vk.api.groups.getById({
+                group_ids: groupId
+            });
+            
+            const posts = await this.vk.api.wall.get({
+                owner_id: -Math.abs(parseInt(groupId)),
+                count: 3
+            });
+            
+            console.log('✅ Тест VK: Успешно');
+            console.log(`   Группа: ${groups[0]?.name}`);
+            console.log(`   Последних постов: ${posts.items.length}`);
+            console.log(`   Последний пост ID: ${posts.items[0]?.id}`);
+            
+            return true;
+        } catch (error) {
+            console.error('❌ Тест VK: Ошибка', error.message);
+            throw error;
+        }
     }
     
     async stop() {
@@ -280,18 +387,10 @@ class VkTelegramBot {
             if (this.vkPollingInterval) {
                 clearInterval(this.vkPollingInterval);
                 this.vkPollingInterval = null;
+                console.log('✅ VK мониторинг остановлен');
             }
             
-            // Корректно останавливаем Telegram ботов
-            if (this.tgBot) {
-                try {
-                    await this.tgBot.stop();
-                    console.log('✅ Основной Telegram бот остановлен');
-                } catch (error) {
-                    console.error('❌ Ошибка остановки основного бота:', error.message);
-                }
-            }
-            
+            // Корректно останавливаем контроллер
             if (this.controllerBot) {
                 try {
                     await this.controllerBot.stop();
@@ -319,8 +418,7 @@ class VkTelegramBot {
             this.vkPollingInterval = null;
         }
         
-        // Очищаем ссылки на ботов
-        this.tgBot = null;
+        // Очищаем ссылки
         this.controllerBot = null;
         this.vk = null;
     }
@@ -341,7 +439,8 @@ class VkTelegramBot {
             photosSent: this.stats.photosSent,
             uptime: this.stats.startTime ? formatUptime(uptime) : 'Неактивен',
             lastUpdate: this.stats.lastUpdate ? 
-                this.stats.lastUpdate.toLocaleTimeString('ru-RU') : 'Нет данных'
+                this.stats.lastUpdate.toLocaleTimeString('ru-RU') : 'Нет данных',
+            lastPostId: this.stats.lastPostId || 0
         };
     }
 }
@@ -378,9 +477,13 @@ app.post('/api/control', async (req, res) => {
                 break;
             case 'restart':
                 await bot.stop();
-                await new Promise(resolve => setTimeout(resolve, 3000)); // Даем время на полную остановку
+                await new Promise(resolve => setTimeout(resolve, 3000));
                 await bot.start();
                 res.json({ success: true, message: 'Бот перезапущен' });
+                break;
+            case 'test':
+                await bot.testVKConnection();
+                res.json({ success: true, message: 'Тест выполнен успешно' });
                 break;
             default:
                 res.status(400).json({ success: false, message: 'Неизвестное действие' });
