@@ -1,6 +1,6 @@
 const express = require('express');
 const { Telegraf } = require('telegraf');
-const { VK } = require('vk-io'); // Правильный импорт
+const { VK } = require('vk-io');
 
 const app = express();
 app.use(express.json());
@@ -63,56 +63,123 @@ class VkTelegramBot {
     
     async setupVKListener() {
         try {
-            // Проверяем доступность VK API
-            const groups = await this.vk.api.groups.getById({});
-            console.log('VK API подключен. Группа:', groups);
+            // Проверяем доступность VK API с правильными параметрами
+            const groupId = process.env.VK_GROUP_ID;
+            if (!groupId) {
+                throw new Error('VK_GROUP_ID не установлен');
+            }
             
-            // Здесь будет основная логика мониторинга VK
+            const groups = await this.vk.api.groups.getById({
+                group_ids: groupId // Исправлено: добавлен group_ids
+            });
+            
+            console.log('✅ VK API подключен. Группа:', groups[0]?.name || 'Неизвестно');
+            
+            // Запускаем мониторинг VK
             this.startVKPolling();
             
         } catch (error) {
-            console.error('Ошибка настройки VK слушателя:', error);
-            throw error;
+            console.error('❌ Ошибка настройки VK слушателя:', error.message);
+            
+            // Продолжаем работу даже если VK не доступен
+            console.log('⚠️  Продолжаем работу без VK мониторинга');
         }
     }
     
     startVKPolling() {
-        // Простая реализация опроса VK wall
-        console.log('Запуск опроса стены VK...');
+        console.log('🔄 Запуск опроса стены VK...');
         
         // В реальной реализации здесь будет setInterval для проверки новых постов
         setInterval(async () => {
             if (!this.isRunning) return;
             
             try {
+                const groupId = process.env.VK_GROUP_ID;
+                if (!groupId) {
+                    console.log('⚠️  VK_GROUP_ID не установлен, пропускаем опрос');
+                    return;
+                }
+                
                 const posts = await this.vk.api.wall.get({
-                    owner_id: -Math.abs(process.env.VK_GROUP_ID),
-                    count: 5
+                    owner_id: -Math.abs(parseInt(groupId)),
+                    count: 5,
+                    filter: 'owner'
                 });
                 
-                console.log(`Проверено постов: ${posts.items.length}`);
+                console.log(`📝 Проверено постов: ${posts.items.length}`);
                 this.stats.lastUpdate = new Date();
                 
+                // Обрабатываем новые посты с фото
+                await this.processVKPosts(posts.items);
+                
             } catch (error) {
-                console.error('Ошибка при опросе VK:', error);
+                console.error('❌ Ошибка при опросе VK:', error.message);
             }
         }, 60000); // Проверка каждую минуту
+    }
+    
+    async processVKPosts(posts) {
+        for (const post of posts) {
+            // Проверяем, есть ли фото в посте
+            if (post.attachments) {
+                const photos = post.attachments.filter(att => att.type === 'photo');
+                
+                if (photos.length > 0) {
+                    console.log(`📸 Найдено ${photos.length} фото в посте ${post.id}`);
+                    
+                    try {
+                        await this.sendToTelegram(photos, post);
+                        this.stats.photosSent += photos.length;
+                        console.log(`✅ Фото из поста ${post.id} отправлены в Telegram`);
+                    } catch (error) {
+                        console.error(`❌ Ошибка отправки фото из поста ${post.id}:`, error.message);
+                    }
+                }
+            }
+        }
+    }
+    
+    async sendToTelegram(photos, post) {
+        try {
+            for (const photo of photos) {
+                // Получаем URL самого большого размера фото
+                const largestPhoto = photo.photo.sizes.reduce((largest, size) => {
+                    return (size.width > largest.width) ? size : largest;
+                });
+                
+                const photoUrl = largestPhoto.url;
+                
+                // Отправляем фото в Telegram канал
+                await this.tgBot.telegram.sendPhoto(
+                    process.env.TG_CHANNEL_ID,
+                    photoUrl,
+                    {
+                        caption: `📸 Новое фото из VK\n⏰ ${new Date(post.date * 1000).toLocaleString('ru-RU')}`
+                    }
+                );
+                
+                console.log('✅ Фото отправлено в Telegram');
+            }
+        } catch (error) {
+            console.error('❌ Ошибка отправки в Telegram:', error.message);
+            throw error;
+        }
     }
     
     setupControllerCommands() {
         // Команды для бота-контроллера
         this.controllerBot.command('start', (ctx) => {
-            ctx.reply('🤖 Бот контроллер активен!\nИспользуйте /status для проверки состояния');
+            ctx.reply('🤖 Бот контроллер активен!\\nИспользуйте /status для проверки состояния');
         });
         
         this.controllerBot.command('status', (ctx) => {
             if (ctx.from.id.toString() === process.env.TG_ADMIN_ID) {
                 const status = this.getStatus();
                 ctx.reply(
-                    `📊 Статус системы:\n` +
-                    `🤖 Бот: ${status.isRunning ? '🟢 Запущен' : '🔴 Остановлен'}\n` +
-                    `📸 Фото отправлено: ${status.photosSent}\n` +
-                    `⏱️ Время работы: ${status.uptime}\n` +
+                    `📊 Статус системы:\\n` +
+                    `🤖 Бот: ${status.isRunning ? '🟢 Запущен' : '🔴 Остановлен'}\\n` +
+                    `📸 Фото отправлено: ${status.photosSent}\\n` +
+                    `⏱️ Время работы: ${status.uptime}\\n` +
                     `🕒 Последнее обновление: ${status.lastUpdate}`
                 );
             } else {
@@ -142,7 +209,7 @@ class VkTelegramBot {
             }
         });
         
-        console.log('Команды контроллера настроены');
+        console.log('✅ Команды контроллера настроены');
     }
     
     async stop() {
@@ -152,15 +219,15 @@ class VkTelegramBot {
         }
         
         try {
-            console.log('Остановка бота...');
+            console.log('🛑 Остановка бота...');
             this.isRunning = false;
             
             await this.tgBot.stop();
             await this.controllerBot.stop();
             
-            console.log('Бот остановлен');
+            console.log('✅ Бот остановлен');
         } catch (error) {
-            console.error('Ошибка остановки бота:', error);
+            console.error('❌ Ошибка остановки бота:', error);
             throw error;
         }
     }
@@ -181,7 +248,7 @@ class VkTelegramBot {
             photosSent: this.stats.photosSent,
             uptime: this.stats.startTime ? formatUptime(uptime) : 'Неактивен',
             lastUpdate: this.stats.lastUpdate ? 
-                this.stats.lastUpdate.toLocaleTimeString() : 'Нет данных'
+                this.stats.lastUpdate.toLocaleTimeString('ru-RU') : 'Нет данных'
         };
     }
 }
@@ -277,4 +344,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Bot server running on port ${PORT}`);
     console.log(`📊 Health check available at http://localhost:${PORT}/health`);
+    console.log(`🔧 API endpoints available at http://localhost:${PORT}/api/`);
 });
